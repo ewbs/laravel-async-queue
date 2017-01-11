@@ -3,7 +3,7 @@ namespace Barryvdh\Queue;
 
 use Barryvdh\Queue\Models\Job;
 use Illuminate\Queue\SyncQueue;
-use Symfony\Component\Process\Process;
+use Barryvdh\Queue\Jobs\AsyncJob;
 
 class AsyncQueue extends SyncQueue
 {
@@ -27,12 +27,11 @@ class AsyncQueue extends SyncQueue
      *
      * @return int
      */
-    public function push($job, $data = '', $queue = null)
+    public function push($job, $data='', $queue=null)
     {
-        $id = $this->storeJob($job, $data, 0);
-        $this->startProcess($id, 0);
-
-        return $id;
+        $id = $this->storeJob($job, $data, $queue);
+        //$this->startProcess($id, 0);
+        return 0;
     }
 
     /**
@@ -42,17 +41,19 @@ class AsyncQueue extends SyncQueue
      *
      * @param string $job
      * @param mixed  $data
+     * @param string|null $queue
      * @param int    $delay
      *
      * @return int
      */
-    public function storeJob($job, $data, $delay = 0)
+    private function storeJob($job, $data, $queue=null, $delay=0)
     {
         $payload = $this->createPayload($job, $data);
 
         $job = new Job();
         $job->status = Job::STATUS_OPEN;
         $job->delay = $delay;
+        if($queue) $job->queue = $queue;
         $job->payload = $payload;
         $job->save();
 
@@ -63,36 +64,31 @@ class AsyncQueue extends SyncQueue
      * Make a Process for the Artisan command for the job id.
      *
      * @param int $jobId
-     * @param int $delay
      *
      * @return void
      */
-    public function startProcess($jobId, $delay = 0)
+    public function startProcess($jobId)
     {
-        $command = $this->getCommand($jobId, $delay);
-        $cwd = $this->container['path.base'];
-
-        $process = new Process($command, $cwd);
-        $process->run();
+        chdir($this->container['path.base']);
+        exec($this->getCommand($jobId));
     }
 
     /**
      * Get the Artisan command as a string for the job id.
      *
      * @param int $jobId
-     * @param int $delay
      *
      * @return string
      */
-    protected function getCommand($jobId, $delay = 0)
+    protected function getCommand($jobId)
     {
-        $cmd = '%s artisan queue:async %d --env=%s --delay=%d';
+        $cmd = '%s artisan queue:async %d --env=%s';
         $cmd = $this->getBackgroundCommand($cmd);
 
         $binary = $this->getPhpBinary();
         $environment = $this->container->environment();
 
-        return sprintf($cmd, $binary, $jobId, $environment, $delay);
+        return sprintf($cmd, $binary, $jobId, $environment);
     }
 
     /**
@@ -102,11 +98,7 @@ class AsyncQueue extends SyncQueue
      */
     protected function getPhpBinary()
     {
-        $path = $this->config['binary'];
-        if (!defined('PHP_WINDOWS_VERSION_BUILD')) {
-            $path = escapeshellarg($path);
-        }
-
+        $path = escapeshellarg($this->config['binary']);
         $args = $this->config['binary_args'];
         if(is_array($args)){
             $args = implode(' ', $args);
@@ -133,13 +125,38 @@ class AsyncQueue extends SyncQueue
      *
      * @return int
      */
-    public function later($delay, $job, $data = '', $queue = null)
+    public function later($delay, $job, $data='', $queue=null)
     {
         $delay = $this->getSeconds($delay);
-        $id = $this->storeJob($job, $data, $delay);
-        $this->startProcess($id, $delay);
-
-        return $id;
+        $id = $this->storeJob($job, $data, $queue, $delay);
+        //$this->startProcess($id);
+        return 0;
     }
-
+	
+	/**
+	 * Pop the next job off of the queue.
+	 * 
+	 * @param string|null  $queue
+	 * @return \Illuminate\Queue\Jobs\Job|null
+	 */
+	public function pop($queue=null) {
+		//TODO Il faudrait peut-être tenir compte de la colonne delay (en tt cas si on compte utiliser cette notion pour déterminer quel est le job suivant...)
+		if($queue)
+			$item=Job::where('queue', '=', $queue)->orderBy('id', 'asc')->first();
+		else
+			$item=Job::orderBy('id', 'asc')->first();
+		if($item)
+			return new AsyncJob($this->container, $item);
+		return null;
+	}
+	
+	/**
+	 * 
+	 * {@inheritDoc}
+	 * @see \Illuminate\Queue\SyncQueue::pushRaw()
+	 */
+	public function pushRaw($payload, $queue=null, array $options = array()) {
+		$payload=json_decode($payload,true);
+		return $this->storeJob($payload['job'], $payload['data'], $queue);
+	}
 }
